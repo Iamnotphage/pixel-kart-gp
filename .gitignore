@@ -1,0 +1,13 @@
+# Godot import cache and local editor state
+.godot/
+# Generated builds, export archives and validation scratch files
+build/
+builds/
+dist/
+.validation/
+.user-data/
+# Python caches and OS/editor scratch
+__pycache__/
+*.py[cod]
+.DS_Store
+*.tmp

@@ -1,0 +1,91 @@
+name: Build desktop releases
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish a GitHub Release (run against an existing vX.Y.Z tag)'
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate publishing reference
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          [[ "$REF_TYPE" == tag && "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo 'Publishing requires an existing semantic version tag, such as v1.0.0.' >&2
+            exit 1
+          }
+      - name: Install verified Godot and desktop templates
+        run: bash tools/release_install_godot.sh --templates
+      - name: Test, cross-export, package, and verify
+        run: bash tools/release_build.sh
+      - name: Save release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-release
+          path: dist
+      - name: Verify package checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS.txt
+      - name: Publish versioned release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          BUILT_COMMIT: ${{ github.sha }}
+        run: |
+          actual_commit="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)"
+          [[ "$actual_commit" == "$BUILT_COMMIT" ]] || {
+            echo 'Tag moved after build; refusing to publish mismatched artifacts.' >&2
+            exit 1
+          }
+          # Retry safely after a partial upload or a release created in the web UI.
+          # Only these three owned assets are replaced; other assets are untouched.
+          if ! gh release view "$RELEASE_TAG" --json tagName >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "Pixel Kart GP $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" --clobber \
+            dist/PixelKartGP-Windows-x86_64.zip \
+            dist/PixelKartGP-macOS-universal.zip \
+            dist/SHA256SUMS.txt
+          gh release edit "$RELEASE_TAG" --draft=false --notes-file dist/RELEASE_NOTES.md
